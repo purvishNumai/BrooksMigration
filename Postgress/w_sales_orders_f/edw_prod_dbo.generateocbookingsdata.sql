@@ -1,0 +1,984 @@
+-- DROP PROCEDURE edw_prod_dbo.generateocbookingsdata();
+
+CREATE OR REPLACE PROCEDURE edw_prod_dbo.generateocbookingsdata()
+ LANGUAGE plpgsql
+AS $procedure$
+BEGIN
+    -- start job + cost proc
+    CALL edw_prod_dbo.edw_log_start_job('GenerateOCBookingsData');
+    CALL edw_prod_dbo.generateoccostsdata();
+
+    -- mirror MSSQL update OC.related_line_id where EBS.related_line_id points to OC.line_id
+    UPDATE edw_prod_dbo.w_sales_orders_d oc
+    SET related_line_id = ebs.line_id
+    FROM edw_prod_dbo.w_sales_orders_d ebs
+    WHERE oc.source_system = 'OC'
+      AND ebs.source_system = 'EBS'
+      AND ebs.related_line_id = oc.line_id
+      AND oc.related_line_id IS NULL;
+
+    -- mirror MSSQL update EBS.related_line_id where OC.related_line_id points to EBS.line_id
+    UPDATE edw_prod_dbo.w_sales_orders_d ebs
+    SET related_line_id = oc.line_id
+    FROM edw_prod_dbo.w_sales_orders_d oc
+    WHERE oc.source_system = 'OC'
+      AND ebs.source_system = 'EBS'
+      AND oc.related_line_id = ebs.line_id
+      AND ebs.related_line_id IS NULL;
+
+    -- downstream procs
+    CALL edw_prod_dbo.updatecloudorderswithebsorgs();
+    CALL edw_prod_dbo.updatearsodata();
+
+    -------------------------------------------------------------------------
+    -- INSERT missing negative ORG ids (kept duplicate as in MSSQL)
+    -------------------------------------------------------------------------
+    INSERT INTO edw_prod_dbo.w_organization_d (
+        org_code, org_name, org_type, region, src_org_id, integration_id,
+        created_date, updated_date, source_system
+    )
+    SELECT DISTINCT oc.org_code, oc.org_name, oc.org_type, oc.region,
+           oc.src_org_id * -1,
+           oc.integration_id || '-EBS-OC-REMAP',
+           NOW(), NOW(), 'OC'
+    FROM edw_prod_dbo.w_organization_d oc,
+         edw_prod_dbo.w_sales_orders_f s
+    WHERE NOT EXISTS (
+              SELECT 1
+              FROM edw_prod_dbo.w_organization_d o1
+              WHERE s.source_system = o1.source_system
+                AND o1.src_org_id = s.ship_from_org_id
+          )
+      AND s.ship_from_org_id * -1 = oc.src_org_id
+      AND s.source_system = 'OC'
+      AND oc.source_system = 'EBS';
+
+    -------------------------------------------------------------------------
+    -- INSERT missing ITEM-ORG rows (kept duplicate as in MSSQL)
+    -------------------------------------------------------------------------
+    INSERT INTO edw_prod_dbo.w_item_org_d (
+        inventory_item_id, organization_id, organization_code, item_number, description,
+        buyer_id, buyer_name, planner_code, planner_name, item_type, inventory_item_status_code,
+        inventory_planning_code, sales_account, cost_of_sales_account, expense_account,
+        atp_flag, atp_rule_id, build_in_wip_flag, check_shortages_flag, customer_order_enabled_flag,
+        customer_order_flag, internal_order_enabled_flag, internal_order_flag, inventory_asset_flag,
+        inventory_item_flag, outside_operation_flag, purchasing_enabled_flag, returnable_flag,
+        service_item_flag, serviceable_product_flag, shippable_item_flag, so_transactions_flag,
+        item_standard_cost, standard_cost_currency, item_standard_cost_usd, lead_time_lot_size,
+        fixed_lead_time, full_lead_time, postprocessing_lead_time, preprocessing_lead_time,
+        cum_manufacturing_lead_time, cumulative_total_lead_time, variable_lead_time,
+        fixed_days_supply, fixed_lot_multiplier, fixed_order_quantity, reservable_type,
+        wip_supply_type, planning_make_buy_code, primary_uom_code, primary_unit_of_measure,
+        unit_height, unit_length, unit_of_issue, unit_volume, unit_weight, unit_width,
+        volume_uom_code, weight_uom_code, hts_code, country_of_origin,
+        integration_id, created_date, updated_date, source_system,
+        product_family, product_line, product_model, internal_item,
+        eccn, sourcing_segment, category, commodity_class, copy_segment, atp_rule_name,
+        material_cost, material_cost_usd, material_overhead_cost, material_overhead_cost_usd,
+        resource_cost, resource_cost_usd, overhead_cost, overhead_cost_usd,
+        outside_processing_cost, outside_processing_cost_usd, default_shipping_org,
+        item_creation_date
+    )
+    SELECT DISTINCT s.item_id, s.ship_from_org_id, inv.organization_code, inv.item_number, inv.description,
+           inv.buyer_id, inv.buyer_name, inv.planner_code, inv.planner_name, inv.item_type, inv.inventory_item_status_code,
+           inv.inventory_planning_code, inv.sales_account, inv.cost_of_sales_account, inv.expense_account,
+           inv.atp_flag, inv.atp_rule_id, inv.build_in_wip_flag, inv.check_shortages_flag, inv.customer_order_enabled_flag,
+           inv.customer_order_flag, inv.internal_order_enabled_flag, inv.internal_order_flag, inv.inventory_asset_flag,
+           inv.inventory_item_flag, inv.outside_operation_flag, inv.purchasing_enabled_flag, inv.returnable_flag,
+           inv.service_item_flag, inv.serviceable_product_flag, inv.shippable_item_flag, inv.so_transactions_flag,
+           inv.item_standard_cost, inv.standard_cost_currency, inv.item_standard_cost_usd, inv.lead_time_lot_size,
+           inv.fixed_lead_time, inv.full_lead_time, inv.postprocessing_lead_time, inv.preprocessing_lead_time,
+           inv.cum_manufacturing_lead_time, inv.cumulative_total_lead_time, inv.variable_lead_time,
+           inv.fixed_days_supply, inv.fixed_lot_multiplier, inv.fixed_order_quantity, inv.reservable_type,
+           inv.wip_supply_type, inv.planning_make_buy_code, inv.primary_uom_code, inv.primary_unit_of_measure,
+           inv.unit_height, inv.unit_length, inv.unit_of_issue, inv.unit_volume, inv.unit_weight, inv.unit_width,
+           inv.volume_uom_code, inv.weight_uom_code, inv.hts_code, inv.country_of_origin,
+           inv.integration_id || '-EBS-OC-REMAP', NOW(), NOW(), 'OC',
+           inv.product_family, inv.product_line, inv.product_model, inv.internal_item,
+           inv.eccn, inv.sourcing_segment, inv.category, inv.commodity_class, inv.copy_segment, inv.atp_rule_name,
+           inv.material_cost, inv.material_cost_usd, inv.material_overhead_cost, inv.material_overhead_cost_usd,
+           inv.resource_cost, inv.resource_cost_usd, inv.overhead_cost, inv.overhead_cost_usd,
+           inv.outside_processing_cost, inv.outside_processing_cost_usd, inv.default_shipping_org * -1,
+           inv.item_creation_date
+    FROM edw_prod_dbo.w_sales_orders_f s,
+         edw_prod_dbo.w_item_org_d inv
+    WHERE NOT EXISTS (
+              SELECT 1
+              FROM edw_prod_dbo.w_item_org_d i
+              WHERE s.source_system = i.source_system
+                AND i.inventory_item_id = s.item_id
+                AND i.organization_id = s.ship_from_org_id
+          )
+      AND s.item_id * -1 = inv.inventory_item_id
+      AND s.ship_from_org_id * -1 = inv.organization_id
+      AND s.source_system = 'OC'
+      AND inv.source_system = 'EBS';
+
+    -------------------------------------------------------------------------
+    -- fix blank customer names on sites
+    -------------------------------------------------------------------------
+    UPDATE edw_prod_dbo.w_customer_site_d s
+    SET customer_name = d.customer_name
+    FROM edw_prod_dbo.w_customer_d d
+    WHERE s.cust_account_id = d.cust_account_id
+      AND s.source_system = d.source_system
+      AND s.source_system = 'OC'
+      AND s.customer_name IS NULL
+      AND d.customer_name IS NOT NULL;
+
+    -------------------------------------------------------------------------
+    -- booked_date sync from doo_headers_all (type-safing casts)
+    -------------------------------------------------------------------------
+    UPDATE edw_prod_dbo.w_sales_orders_d d
+    SET booked_date = h.headersubmitteddate::DATE
+    FROM oc_prod_dbo.doo_headers_all h
+    WHERE d.header_id = h.headerid::NUMERIC
+      AND COALESCE(d.booked_date::date,'2000-01-01'::date)::date <> COALESCE(h.headersubmitteddate::date,'2000-01-01'::date)::date
+      AND d.source_system = 'OC';
+
+    -------------------------------------------------------------------------
+    -- converted_list -> update OC booked_date from EBS min(booked_date)
+    -------------------------------------------------------------------------
+    WITH converted_list AS (
+        SELECT MIN(booked_date) AS booked_date, order_number,
+               COALESCE(d.customer_po,'~') AS customer_po
+        FROM edw_prod_dbo.w_sales_orders_d d
+        WHERE d.source_system = 'EBS'
+          AND d.booked_date IS NOT NULL
+          AND EXISTS (
+              SELECT 1
+              FROM edw_prod_dbo.w_sales_orders_d d1
+              WHERE d1.source_system = 'OC'
+                AND d1.order_source_reference = d.order_number
+                AND COALESCE(d1.customer_po,'~') = COALESCE(d.customer_po,'~')
+                AND d1.order_status NOT IN ('DOO_REFERENCE','DOO_DRAFT')
+          )
+        GROUP BY order_number, COALESCE(d.customer_po,'~')
+    )
+    UPDATE edw_prod_dbo.w_sales_orders_d s
+    SET booked_date = c.booked_date
+    FROM converted_list c
+    WHERE s.order_source_reference = c.order_number
+      AND COALESCE(s.customer_po,'~') = c.customer_po
+      AND s.source_system = 'OC'
+      AND s.order_status NOT IN ('DOO_REFERENCE','DOO_DRAFT');
+
+    -------------------------------------------------------------------------
+    -- repeat inserts (MSSQL had duplicates) - keep same behavior
+    -------------------------------------------------------------------------
+    INSERT INTO edw_prod_dbo.w_organization_d (
+        org_code, org_name, org_type, region, src_org_id, integration_id,
+        created_date, updated_date, source_system
+    )
+    SELECT DISTINCT
+        oc.org_code,
+        oc.org_name,
+        oc.org_type,
+        oc.region,
+        oc.src_org_id * -1,
+        oc.integration_id || '-EBS-OC-REMAP',
+        NOW(),
+        NOW(),
+        'OC'
+    FROM edw_prod_dbo.w_organization_d oc,
+         edw_prod_dbo.w_sales_orders_f s
+    WHERE NOT EXISTS (
+              SELECT 1
+              FROM edw_prod_dbo.w_organization_d o1
+              WHERE s.source_system = o1.source_system
+                AND o1.src_org_id = s.ship_from_org_id
+          )
+      AND s.ship_from_org_id * -1 = oc.src_org_id
+      AND s.source_system = 'OC'
+      AND oc.source_system = 'EBS';
+
+    INSERT INTO edw_prod_dbo.w_item_org_d (
+        INVENTORY_ITEM_ID, ORGANIZATION_ID, ORGANIZATION_CODE, ITEM_NUMBER,
+        DESCRIPTION, BUYER_ID, BUYER_NAME, PLANNER_CODE, PLANNER_NAME, ITEM_TYPE,
+        INVENTORY_ITEM_STATUS_CODE, INVENTORY_PLANNING_CODE, SALES_ACCOUNT,
+        COST_OF_SALES_ACCOUNT, EXPENSE_ACCOUNT, ATP_FLAG, ATP_RULE_ID,
+        BUILD_IN_WIP_FLAG, CHECK_SHORTAGES_FLAG, CUSTOMER_ORDER_ENABLED_FLAG,
+        CUSTOMER_ORDER_FLAG, INTERNAL_ORDER_ENABLED_FLAG, INTERNAL_ORDER_FLAG,
+        INVENTORY_ASSET_FLAG, INVENTORY_ITEM_FLAG, OUTSIDE_OPERATION_FLAG,
+        PURCHASING_ENABLED_FLAG, RETURNABLE_FLAG, SERVICE_ITEM_FLAG,
+        SERVICEABLE_PRODUCT_FLAG, SHIPPABLE_ITEM_FLAG, SO_TRANSACTIONS_FLAG,
+        ITEM_STANDARD_COST, STANDARD_COST_CURRENCY, ITEM_STANDARD_COST_USD,
+        LEAD_TIME_LOT_SIZE, FIXED_LEAD_TIME, FULL_LEAD_TIME,
+        POSTPROCESSING_LEAD_TIME, PREPROCESSING_LEAD_TIME,
+        CUM_MANUFACTURING_LEAD_TIME, CUMULATIVE_TOTAL_LEAD_TIME,
+        VARIABLE_LEAD_TIME, FIXED_DAYS_SUPPLY, FIXED_LOT_MULTIPLIER,
+        FIXED_ORDER_QUANTITY, RESERVABLE_TYPE, WIP_SUPPLY_TYPE,
+        PLANNING_MAKE_BUY_CODE, PRIMARY_UOM_CODE, PRIMARY_UNIT_OF_MEASURE,
+        UNIT_HEIGHT, UNIT_LENGTH, UNIT_OF_ISSUE, UNIT_VOLUME, UNIT_WEIGHT,
+        UNIT_WIDTH, VOLUME_UOM_CODE, WEIGHT_UOM_CODE, HTS_CODE,
+        COUNTRY_OF_ORIGIN, INTEGRATION_ID, CREATED_DATE, UPDATED_DATE,
+        SOURCE_SYSTEM, PRODUCT_FAMILY, PRODUCT_LINE, PRODUCT_MODEL,
+        INTERNAL_ITEM, ECCN, SOURCING_SEGMENT, CATEGORY, COMMODITY_CLASS,
+        COPY_SEGMENT, ATP_RULE_NAME, MATERIAL_COST, MATERIAL_COST_USD,
+        MATERIAL_OVERHEAD_COST, MATERIAL_OVERHEAD_COST_USD, RESOURCE_COST,
+        RESOURCE_COST_USD, OVERHEAD_COST, OVERHEAD_COST_USD,
+        OUTSIDE_PROCESSING_COST, OUTSIDE_PROCESSING_COST_USD,
+        DEFAULT_SHIPPING_ORG, ITEM_CREATION_DATE
+    )
+    SELECT DISTINCT
+        s.ITEM_ID,
+        s.SHIP_FROM_ORG_ID,
+        inv.organization_code,
+        inv.item_number,
+        inv.description,
+        inv.buyer_id,
+        inv.buyer_name,
+        inv.planner_code,
+        inv.planner_name,
+        inv.item_type,
+        inv.inventory_item_status_code,
+        inv.inventory_planning_code,
+        inv.sales_account,
+        inv.cost_of_sales_account,
+        inv.expense_account,
+        inv.atp_flag,
+        inv.atp_rule_id,
+        inv.build_in_wip_flag,
+        inv.check_shortages_flag,
+        inv.customer_order_enabled_flag,
+        inv.customer_order_flag,
+        inv.internal_order_enabled_flag,
+        inv.internal_order_flag,
+        inv.inventory_asset_flag,
+        inv.inventory_item_flag,
+        inv.outside_operation_flag,
+        inv.purchasing_enabled_flag,
+        inv.returnable_flag,
+        inv.service_item_flag,
+        inv.serviceable_product_flag,
+        inv.shippable_item_flag,
+        inv.so_transactions_flag,
+        inv.item_standard_cost,
+        inv.standard_cost_currency,
+        inv.item_standard_cost_usd,
+        inv.lead_time_lot_size,
+        inv.fixed_lead_time,
+        inv.full_lead_time,
+        inv.postprocessing_lead_time,
+        inv.preprocessing_lead_time,
+        inv.cum_manufacturing_lead_time,
+        inv.cumulative_total_lead_time,
+        inv.variable_lead_time,
+        inv.fixed_days_supply,
+        inv.fixed_lot_multiplier,
+        inv.fixed_order_quantity,
+        inv.reservable_type,
+        inv.wip_supply_type,
+        inv.planning_make_buy_code,
+        inv.primary_uom_code,
+        inv.primary_unit_of_measure,
+        inv.unit_height,
+        inv.unit_length,
+        inv.unit_of_issue,
+        inv.unit_volume,
+        inv.unit_weight,
+        inv.unit_width,
+        inv.volume_uom_code,
+        inv.weight_uom_code,
+        inv.hts_code,
+        inv.country_of_origin,
+        inv.integration_id || '-EBS-OC-REMAP',
+        NOW(),
+        NOW(),
+        'OC',
+        inv.product_family,
+        inv.product_line,
+        inv.product_model,
+        inv.internal_item,
+        inv.eccn,
+        inv.sourcing_segment,
+        inv.category,
+        inv.commodity_class,
+        inv.copy_segment,
+        inv.atp_rule_name,
+        inv.material_cost,
+        inv.material_cost_usd,
+        inv.material_overhead_cost,
+        inv.material_overhead_cost_usd,
+        inv.resource_cost,
+        inv.resource_cost_usd,
+        inv.overhead_cost,
+        inv.overhead_cost_usd,
+        inv.outside_processing_cost,
+        inv.outside_processing_cost_usd,
+        inv.default_shipping_org * -1,
+        inv.item_creation_date
+    FROM edw_prod_dbo.w_sales_orders_f s,
+         edw_prod_dbo.w_item_org_d inv
+    WHERE NOT EXISTS (
+              SELECT 1
+              FROM edw_prod_dbo.w_item_org_d i
+              WHERE s.source_system = i.source_system
+                AND i.inventory_item_id = s.item_id
+                AND i.organization_id = s.ship_from_org_id
+          )
+      AND s.item_id * -1 = inv.inventory_item_id
+      AND s.ship_from_org_id * -1 = inv.organization_id
+      AND s.source_system = 'OC'
+      AND inv.source_system = 'EBS';
+
+    -------------------------------------------------------------------------
+    -- INSERT ORDER LINES THAT DO NOT EXIST (INITIAL)
+    -------------------------------------------------------------------------
+    INSERT INTO edw_prod_dbo.w_booking_trxn (
+        order_id, line_id, org_id, invoice_to_org_id, ship_to_org_id,
+        sold_to_org_id, ship_from_org_id, inventory_item_id,
+        bkg_change_date, transaction_type, qty_ordered, qty_shipped,
+        qty_cancelled, qty_fulfilled, qty_invoiced, unit_cost,
+        unit_selling_price, extended_price, net_qty_ordered,
+        net_qty_shipped, net_qty_cancelled, net_qty_fulfilled,
+        net_qty_invoiced, net_unit_cost, net_unit_selling_price,
+        net_extended_price, integration_id, created_date,
+        updated_date, source_system, snapshot_date, status
+    )
+    SELECT
+        source.order_id,
+        source.line_id,
+        source.org_id,
+        source.invoice_to_org_id,
+        source.ship_to_org_id,
+        source.sold_to_org_id,
+        source.ship_from_org_id,
+        source.item_id,
+        NOW(),
+        'INITIAL-oc',
+        COALESCE(source.qty_ordered, 0),
+        COALESCE(source.qty_shipped, 0),
+        COALESCE(source.qty_cancelled, 0),
+        COALESCE(source.qty_fulfilled, 0),
+        COALESCE(source.qty_invoiced, 0),
+        COALESCE(source.unit_cost, 0),
+        COALESCE(source.unit_price, 0),
+        COALESCE(source.qty_ordered, 0) * COALESCE(source.unit_price, 0),
+        COALESCE(source.qty_ordered, 0),
+        COALESCE(source.qty_shipped, 0),
+        COALESCE(source.qty_cancelled, 0),
+        COALESCE(source.qty_fulfilled, 0),
+        COALESCE(source.qty_invoiced, 0),
+        COALESCE(source.unit_cost, 0),
+        COALESCE(source.unit_price, 0),
+        COALESCE(source.qty_ordered, 0) * COALESCE(source.unit_price, 0),
+        source.integration_id::VARCHAR || '.' || gen_random_uuid()::VARCHAR,
+        source.created_date,
+        source.updated_date,
+        'OC',
+        NOW(),
+        'Booked'
+    FROM edw_prod_dbo.w_sales_orders_f source,
+         edw_prod_dbo.w_sales_orders_d d
+    WHERE NOT EXISTS (
+              SELECT 1
+              FROM edw_prod_dbo.w_booking_trxn f
+              WHERE f.line_id = source.line_id
+                AND f.source_system = source.source_system
+          )
+      AND d.line_id = source.line_id
+      AND d.order_status NOT IN ('DOO_REFERENCE','DOO_DRAFT')
+      AND d.fulfill_line_status <> 'DRAFT'
+      AND d.source_system = source.source_system
+      AND source.source_system = 'OC';
+
+    -------------------------------------------------------------------------
+    -- INSERT CHANGE01 rows (differences vs last snapshot)
+    -------------------------------------------------------------------------
+    INSERT INTO edw_prod_dbo.w_booking_trxn (
+        order_id, line_id, org_id, invoice_to_org_id, ship_to_org_id,
+        sold_to_org_id, ship_from_org_id, inventory_item_id, bkg_change_date,
+        transaction_type, qty_ordered, qty_shipped, qty_cancelled,
+        qty_fulfilled, qty_invoiced, unit_cost, unit_selling_price,
+        extended_price, net_qty_ordered, net_qty_shipped, net_qty_cancelled,
+        net_qty_fulfilled, net_qty_invoiced, net_unit_cost,
+        net_unit_selling_price, net_extended_price, integration_id,
+        created_date, updated_date, source_system, snapshot_date, status
+    )
+    SELECT
+        source.order_id,
+        source.line_id,
+        source.org_id,
+        source.invoice_to_org_id,
+        source.ship_to_org_id,
+        source.sold_to_org_id,
+        source.ship_from_org_id,
+        source.item_id,
+        NOW(),
+        'CHANGE01',
+        COALESCE(source.qty_ordered,0) - COALESCE(f.qty_ordered,0),
+        COALESCE(source.qty_shipped,0) - COALESCE(f.qty_shipped,0),
+        COALESCE(source.qty_cancelled,0) - COALESCE(f.qty_cancelled,0),
+        COALESCE(source.qty_fulfilled,0) - COALESCE(f.qty_fulfilled,0),
+        COALESCE(source.qty_invoiced,0) - COALESCE(f.qty_invoiced,0),
+        COALESCE(source.unit_cost,0) - COALESCE(f.unit_cost,0),
+        COALESCE(source.unit_price,0) - COALESCE(f.unit_selling_price,0),
+        (COALESCE(source.qty_ordered,0) * COALESCE(source.unit_price,0)) - f.extended_price,
+        COALESCE(source.qty_ordered,0),
+        COALESCE(source.qty_shipped,0),
+        COALESCE(source.qty_cancelled,0),
+        COALESCE(source.qty_fulfilled,0),
+        COALESCE(source.qty_invoiced,0),
+        COALESCE(source.unit_cost,0),
+        COALESCE(source.unit_price,0),
+        COALESCE(source.qty_ordered,0) * COALESCE(source.unit_price,0),
+        source.integration_id || '.' || gen_random_uuid(),
+        source.created_date,
+        source.updated_date,
+        'OC',
+        NOW(),
+        CASE WHEN d.fulfill_line_status = 'CANCELED' THEN 'Cancelled' ELSE 'Booked' END
+    FROM edw_prod_dbo.w_sales_orders_f source
+    JOIN edw_prod_dbo.w_booking_trxn f ON f.line_id = source.line_id
+                         AND source.source_system = f.source_system
+    JOIN edw_prod_dbo.w_sales_orders_d d ON d.line_id = source.line_id
+                            AND d.source_system = source.source_system
+    WHERE (COALESCE(f.net_qty_cancelled,0) <> COALESCE(source.qty_cancelled,0)
+           OR COALESCE(f.net_qty_ordered,0) <> COALESCE(source.qty_ordered,0)
+           OR COALESCE(f.net_unit_selling_price,0) <> COALESCE(source.unit_price,0))
+      AND source.source_system = 'OC'
+      AND f.snapshot_date = (
+            SELECT max(d1.snapshot_date)
+            FROM edw_prod_dbo.w_booking_trxn d1
+            WHERE d1.line_id = source.line_id
+        )
+      AND COALESCE(d.fulfill_line_status,'Why Would I be NULL?') NOT IN ('DRAFT')
+      AND d.order_status NOT IN ('DOO_REFERENCE','DOO_DRAFT','CANCELED')
+      AND d.life_cycle_status <> 'Cancelled';
+
+    -------------------------------------------------------------------------
+    -- INSERT CANCEL Change rows (from INITIAL rows when lifecycle is Cancelled)
+    -------------------------------------------------------------------------
+    INSERT INTO edw_prod_dbo.w_booking_trxn (
+        order_id, line_id, org_id, invoice_to_org_id, ship_to_org_id,
+        sold_to_org_id, ship_from_org_id, inventory_item_id, bkg_change_date,
+        transaction_type, qty_ordered, qty_shipped, qty_cancelled,
+        qty_fulfilled, qty_invoiced, unit_cost, unit_selling_price,
+        extended_price, net_qty_ordered, net_qty_shipped, net_qty_cancelled,
+        net_qty_fulfilled, net_qty_invoiced, net_unit_cost,
+        net_unit_selling_price, net_extended_price, integration_id,
+        created_date, updated_date, source_system, snapshot_date,
+        booked_date, status
+    )
+    SELECT
+        x.order_id,
+        x.line_id,
+        x.org_id,
+        x.invoice_to_org_id,
+        x.ship_to_org_id,
+        x.sold_to_org_id,
+        x.ship_from_org_id,
+        x.inventory_item_id,
+        x.bkg_change_date,
+        'Change',
+        x.qty_ordered * -1,
+        x.qty_shipped * -1,
+        x.qty_ordered,
+        x.qty_fulfilled,
+        x.qty_invoiced,
+        x.unit_cost * -1,
+        x.unit_selling_price * -1,
+        x.extended_price * -1,
+        x.net_qty_ordered * -1,
+        x.net_qty_shipped * -1,
+        x.net_qty_ordered * -1,
+        0,
+        0,
+        0,
+        0,
+        x.net_extended_price * -1,
+        x.integration_id || '.' || gen_random_uuid(),
+        NOW(),
+        NOW(),
+        x.source_system,
+        NOW(),
+        x.booked_date,
+        'Cancelled'
+    FROM edw_prod_dbo.w_booking_trxn x
+    JOIN edw_prod_dbo.w_sales_orders_d d ON d.line_id = x.line_id
+                            AND x.source_system = d.source_system
+    WHERE d.life_cycle_status = 'Cancelled'
+      AND x.transaction_type LIKE 'INITIAL%'
+      AND COALESCE(x.status,'Booked') = 'Booked'
+      AND x.source_system = 'OC';
+
+    -------------------------------------------------------------------------
+    -- mark existing initial transactions as Cancelled
+    -------------------------------------------------------------------------
+    UPDATE edw_prod_dbo.w_booking_trxn x
+    SET status = 'Cancelled'
+    FROM edw_prod_dbo.w_sales_orders_d d
+    WHERE d.line_id = x.line_id
+      AND d.life_cycle_status = 'Cancelled'
+      AND x.transaction_type LIKE 'INITIAL%'
+      AND COALESCE(x.status,'Booked') = 'Booked'
+      AND x.source_system = d.source_system
+      AND x.source_system = 'OC';
+
+    -------------------------------------------------------------------------
+    -- sync booked_date in booking_trxn from sales_orders_d
+    -------------------------------------------------------------------------
+    UPDATE edw_prod_dbo.w_booking_trxn b
+    SET booked_date = d.booked_date
+    FROM edw_prod_dbo.w_sales_orders_d d
+    WHERE b.line_id = d.line_id
+      --AND COALESCE(b.booked_date, NOW()) <> COALESCE(d.order_creation_date, NOW() - INTERVAL '1 day')
+	  AND COALESCE(b.booked_date::date, CURRENT_DATE)
+        <> COALESCE(d.order_creation_date::date, CURRENT_DATE - 1)
+      AND d.booked_date IS NOT NULL
+      AND b.source_system = d.source_system;
+
+    -------------------------------------------------------------------------
+    -- set initial/ change transaction_type in w_booking_f (EBS)
+    -------------------------------------------------------------------------
+    WITH snap_dates AS (
+        SELECT line_id, MIN(snapshot_date) AS snapshot_date
+        FROM edw_prod_dbo.w_booking_f
+        WHERE source_system = 'EBS'
+        GROUP BY line_id
+    )
+    UPDATE edw_prod_dbo.w_booking_f b
+    SET transaction_type = 'Initial'
+    FROM snap_dates s
+    WHERE b.line_id = s.line_id
+      AND b.snapshot_date = s.snapshot_date
+      AND b.transaction_type IS NULL
+      AND b.source_system = 'EBS';
+
+    UPDATE edw_prod_dbo.w_booking_f
+    SET transaction_type = 'Change'
+    WHERE transaction_type IS NULL
+      AND source_system = 'EBS';
+
+    -------------------------------------------------------------------------
+    -- update salesrep region
+    -------------------------------------------------------------------------
+    UPDATE edw_prod_dbo.w_salesrep_d s
+    SET region = c.country
+    FROM edw_prod_ref.bi_country_region c
+    WHERE s.region = c.region
+      AND COALESCE(s.region, '~') <> COALESCE(c.region, '~');
+
+    -------------------------------------------------------------------------
+    -- call loaders
+    -------------------------------------------------------------------------
+    CALL edw_prod_dbo.loadbbbv2();
+    CALL edw_prod_dbo.loadbookingsdata();
+
+    -------------------------------------------------------------------------
+    -- update fnc_bookings_mv metadata from sales_orders_d
+    -------------------------------------------------------------------------
+    UPDATE edw_prod_dbo.fnc_bookings_mv f
+    SET order_created_by   = s.order_created_by,
+        line_created_by    = s.line_created_by,
+        last_updated_by    = s.last_update_by,
+        line_creation_date = CASE WHEN f.line_creation_date IS NOT NULL THEN f.line_creation_date ELSE s.line_creation_date END,
+        order_creation_date= CASE WHEN f.order_creation_date IS NOT NULL THEN f.order_creation_date ELSE s.order_creation_date END,
+        last_update_date   = CASE WHEN f.last_update_date IS NOT NULL THEN f.last_update_date ELSE s.last_update_date END
+    FROM edw_prod_dbo.w_sales_orders_d s
+    WHERE f.line_id = s.line_id
+      AND f.source_system = s.source_system;
+
+    -------------------------------------------------------------------------
+    -- update fnc_backlog_billing_mv metadata from sales_orders_d
+    -------------------------------------------------------------------------
+    UPDATE edw_prod_dbo.fnc_backlog_billing_mv f
+    SET line_creation_date = CASE WHEN f.line_creation_date IS NOT NULL THEN f.line_creation_date ELSE s.line_creation_date END,
+        order_creation_date= CASE WHEN f.order_creation_date IS NOT NULL THEN f.order_creation_date ELSE s.order_creation_date END,
+        last_update_date   = CASE WHEN f.last_update_date IS NOT NULL THEN f.last_update_date ELSE s.last_update_date END
+    FROM edw_prod_dbo.w_sales_orders_d s
+    WHERE f.line_id = s.line_id
+      AND f.source_system = s.source_system;
+
+    -------------------------------------------------------------------------
+    -- update Product Family/Line/Model for backlog/bookings (fix logic bug to reference m fields)
+    -------------------------------------------------------------------------
+    UPDATE edw_prod_dbo.fnc_backlog_billing_mv m
+    SET "Product Family" = REPLACE(i.product_family, '_', ' '),
+        "Product Line"   = REPLACE(i.product_line, '_', ' '),
+        "Product Model"  = REPLACE(i.product_model, '_', ' ')
+    FROM edw_prod_dbo.w_sales_orders_f f
+    JOIN edw_prod_dbo.w_item_org_d i
+      ON i.inventory_item_id = f.item_id
+      AND i.organization_id = f.ship_from_org_id
+    WHERE m.line_id = f.line_id
+      AND i.product_family IS NOT NULL
+      AND m."Product Family" IS NULL
+      AND m.source_system = i.source_system
+      AND f.source_system = i.source_system;
+
+    UPDATE edw_prod_dbo.fnc_bookings_mv m
+    SET "Product Family" = REPLACE(i.product_family, '_', ' '),
+        "Product Line"   = REPLACE(i.product_line, '_', ' '),
+        "Product Model"  = REPLACE(i.product_model, '_', ' ')
+    FROM edw_prod_dbo.w_sales_orders_f f
+    JOIN edw_prod_dbo.w_item_org_d i
+      ON i.inventory_item_id = f.item_id
+      AND i.organization_id = f.ship_from_org_id
+    WHERE m.line_id = f.line_id
+      AND i.product_family IS NOT NULL
+      AND m."Product Family" IS NULL
+      AND m.source_system = i.source_system
+      AND f.source_system = i.source_system;
+
+    -- same updates without org check (kept duplicates per MSSQL)
+    UPDATE edw_prod_dbo.fnc_backlog_billing_mv m
+    SET "Product Family" = REPLACE(i.product_family, '_', ' '),
+        "Product Line"   = REPLACE(i.product_line, '_', ' '),
+        "Product Model"  = REPLACE(i.product_model, '_', ' ')
+    FROM edw_prod_dbo.w_sales_orders_f f
+    JOIN edw_prod_dbo.w_item_org_d i
+      ON i.inventory_item_id = f.item_id
+    WHERE m.line_id = f.line_id
+      AND i.product_family IS NOT NULL
+      AND m."Product Family" IS NULL
+      AND m.source_system = i.source_system
+      AND f.source_system = i.source_system;
+
+    UPDATE edw_prod_dbo.fnc_bookings_mv m
+    SET "Product Family" = REPLACE(i.product_family, '_', ' '),
+        "Product Line"   = REPLACE(i.product_line, '_', ' '),
+        "Product Model"  = REPLACE(i.product_model, '_', ' ')
+    FROM edw_prod_dbo.w_sales_orders_f f
+    JOIN edw_prod_dbo.w_item_org_d i
+      ON i.inventory_item_id = f.item_id
+    WHERE m.line_id = f.line_id
+      AND i.product_family IS NOT NULL
+      AND m."Product Family" IS NULL
+      AND m.source_system = i.source_system
+      AND f.source_system = i.source_system;
+
+    -------------------------------------------------------------------------
+    -- update Order Date for bookings/backlog when invoiced
+    -------------------------------------------------------------------------
+    UPDATE edw_prod_dbo.fnc_bookings_mv f
+    SET "Order Date" = COALESCE(s.inv_gl_date, s.inv_trx_date)
+    FROM edw_prod_dbo.w_sales_orders_d s
+    WHERE f.line_id = s.line_id
+      AND f.source_system = s.source_system
+      AND f."Order Date" IS NULL
+      AND s.life_cycle_status = 'Invoiced'
+      AND COALESCE(s.inv_gl_date, s.inv_trx_date) IS NOT NULL;
+
+    UPDATE edw_prod_dbo.fnc_backlog_billing_mv f
+    SET "Order Date" = COALESCE(s.inv_gl_date, s.inv_trx_date)
+    FROM edw_prod_dbo.w_sales_orders_d s
+    WHERE f.line_id = s.line_id
+      AND f.source_system = s.source_system
+      AND f."Order Date" IS NULL
+      AND s.life_cycle_status = 'Invoiced'
+      AND COALESCE(s.inv_gl_date, s.inv_trx_date) IS NOT NULL;
+
+    -------------------------------------------------------------------------
+    -- fix backlog dates to first of current month for non-invoiced
+    -------------------------------------------------------------------------
+    UPDATE edw_prod_dbo.fnc_backlog_billing_mv
+    SET "Order Date" = date_trunc('month', current_date)
+    WHERE "Line Order Type" <> 'Invoiced'
+      AND "Order Date" < date_trunc('month', current_date);
+
+    -------------------------------------------------------------------------
+    -- temp table to hold item/org + order_date + line_id (mimic @table variable)
+    -------------------------------------------------------------------------
+    CREATE TEMP TABLE cost_temp1 (
+    inventory_item_id bigint,
+    organization_id bigint,
+    order_date date,
+    line_id bigint
+);
+ 
+INSERT INTO cost_temp1 (inventory_item_id, organization_id, order_date, line_id)
+SELECT
+  ebs_inv.inventory_item_id,
+  ebs_inv.organization_id,
+  m1.order_date,
+  oc.line_id
+FROM
+/* OC orders: only keys, filtered inside */
+(
+  SELECT
+    customer_po,
+    line_id::bigint  AS line_id,
+    item_id::bigint  AS item_id,
+    source_system
+  FROM edw_prod_dbo.w_sales_orders_v
+  WHERE source_system = 'OC'
+) oc
+ 
+/* EBS orders: only keys, filtered inside */
+JOIN (
+  SELECT
+    customer_po,
+    item_id::bigint          AS item_id,
+    ship_from_org_id::bigint AS ship_from_org_id,
+    source_system
+  FROM edw_prod_dbo.w_sales_orders_v
+  WHERE source_system = 'EBS'
+) ebs
+  ON ebs.customer_po = oc.customer_po
+/* OC item/org: restricted to BIM + match source_system */
+JOIN (
+  SELECT
+    inventory_item_id,
+    item_number,
+    source_system
+  FROM edw_prod_dbo.w_item_org_d
+  WHERE organization_code = 'BIM'
+) oc_inv
+  ON oc.item_id       = oc_inv.inventory_item_id
+AND oc.source_system = oc_inv.source_system
+/* EBS item/org: only what we use */
+JOIN (
+  SELECT
+    inventory_item_id,
+    organization_id,
+    item_number,
+    source_system
+  FROM edw_prod_dbo.w_item_org_d
+) ebs_inv
+  ON ebs.item_id          = ebs_inv.inventory_item_id
+AND ebs.source_system    = ebs_inv.source_system
+And ebs.ship_from_org_id = ebs_inv.organization_id
+AND ebs_inv.item_number  = oc_inv.item_number
+ 
+/* Backlog: typed once; only needed cols */
+JOIN (
+  SELECT
+    line_id::bigint    AS line_id,
+    "Order Date"::date AS order_date
+  FROM edw_prod_dbo.fnc_backlog_billing_mv
+) m1
+  ON m1.line_id = oc.line_id
+/* Eligibility: SAME logic as your EXISTS, set-based & deduped */
+JOIN (
+  SELECT DISTINCT
+    dfla.fulfilllinelineid::bigint AS line_id
+  FROM oc_prod_dbo.doo_fulfill_lines_all       dfla
+  JOIN oc_prod_dbo.doo_lines_all               dla
+    ON dla.lineid = dfla.fulfilllinelineid
+  JOIN oc_prod_dbo.doo_headers_all             dha
+    ON dha.headerid = dla.lineheaderid
+  JOIN oc_prod_dbo.msc_xref_mapping            mxm1
+    ON mxm1.entity_name = 'SUPPLIERS'
+   AND mxm1.target_value = dfla.fulfilllinesupplierid
+  JOIN oc_prod_dbo.msc_xref_mapping            mxm2
+    ON mxm2.entity_name = 'SUPPLIER_SITES'
+   AND mxm2.target_value = dfla.fulfilllinesuppliersiteid
+  JOIN oc_prod_dbo.poz_suppliers               psv
+    ON psv.vendorid = mxm1.source_value
+  JOIN oc_prod_dbo.poz_supplier_sites_all_m    pssam
+    ON pssam.vendorsiteid = mxm2.source_value
+  JOIN oc_prod_dbo.msc_trading_partner_sites   mtps
+    ON mtps.partner_id      = dfla.fulfilllinesupplierid
+   AND mtps.partner_site_id = dfla.fulfilllinesuppliersiteid
+  WHERE dha.headersubmittedflag = 'Y'
+) elig
+  ON elig.line_id = oc.line_id;
+/**
+SELECT ebs_inv.inventory_item_id,
+       ebs_inv.organization_id,
+       m1."Order Date",
+       m1.line_id
+FROM edw_prod_dbo.w_sales_orders_v oc
+JOIN edw_prod_dbo.w_sales_orders_v ebs ON oc.customer_po = ebs.customer_po
+JOIN edw_prod_dbo.w_item_org_d oc_inv ON oc.item_id::BIGINT = oc_inv.inventory_item_id
+JOIN edw_prod_dbo.w_item_org_d ebs_inv ON ebs.item_id = ebs_inv.inventory_item_id
+JOIN edw_prod_dbo.fnc_backlog_billing_mv m1 ON m1.line_id::BIGINT = oc.line_id
+WHERE oc.source_system = 'OC'
+  AND ebs.source_system = 'EBS'
+  AND oc_inv.organization_code = 'BIM'
+  AND ebs.ship_from_org_id::BIGINT = ebs_inv.organization_id
+  AND ebs_inv.item_number = oc_inv.item_number
+  AND ebs_inv.source_system = ebs.source_system
+  AND CAST(oc_inv.source_system AS BIGINT) = CAST(oc.source_system AS BIGINT)
+  AND EXISTS (
+        SELECT 1
+        FROM oc_prod_dbo.msc_trading_partner_sites mtps
+        JOIN oc_prod_dbo.doo_fulfill_lines_all dfla ON dfla.fulfilllinelineid::NUMERIC = oc.line_id
+        JOIN oc_prod_dbo.doo_lines_all dla ON dla.lineid = dfla.fulfilllinelineid
+        JOIN oc_prod_dbo.doo_headers_all dha ON dla.lineheaderid = dha.headerid
+        JOIN oc_prod_dbo.msc_xref_mapping mxm1 ON mxm1.entity_name = 'SUPPLIERS' AND mxm1.target_value = dfla.fulfilllinesupplierid
+        JOIN oc_prod_dbo.msc_xref_mapping mxm2 ON mxm2.entity_name = 'SUPPLIER_SITES' AND mxm2.target_value = dfla.fulfilllinesuppliersiteid
+        JOIN oc_prod_dbo.poz_suppliers psv ON psv.vendorid = mxm1.source_value
+        JOIN oc_prod_dbo.poz_supplier_sites_all_m pssam ON pssam.vendorsiteid = mxm2.source_value
+        WHERE dha.headersubmittedflag = 'Y'
+          AND dfla.fulfilllinesupplierid = mtps.partner_id
+          AND dfla.fulfilllinesuppliersiteid = mtps.partner_site_id
+  );
+*/
+
+    -- Update backlog costs
+    UPDATE edw_prod_dbo.fnc_backlog_billing_mv m1
+    SET "Ship From Item Cost LC" = edw_prod_dbo.edw_getcostfrozencostperavglc(e.inventory_item_id::BIGINT, e.organization_id::BIGINT, e.order_date::date, 'EBS'),
+        "Ship From Item Cost USD" = edw_prod_dbo.edw_getcostfrozencostperavgusd(e.inventory_item_id::BIGINT, e.organization_id::BIGINT, e.order_date::date, 'EBS'),
+        "Ext Ship From Item Cost LC" = edw_prod_dbo.edw_getcostfrozencostperavglc(e.inventory_item_id::BIGINT, e.organization_id::BIGINT, e.order_date::date, 'EBS') * m1."Ordered Quantity",
+        "Ext Ship From Item Cost USD" = edw_prod_dbo.edw_getcostfrozencostperavgusd(e.inventory_item_id::BIGINT, e.organization_id::BIGINT, e.order_date::date, 'EBS') * m1."Ordered Quantity"
+    FROM cost_temp1 e
+    WHERE e.line_id = m1.line_id;
+
+    TRUNCATE cost_temp1;
+
+    -- Insert into temp for bookings
+
+    INSERT INTO cost_temp1 (inventory_item_id, organization_id, order_date, line_id)
+SELECT
+  ebs_inv.inventory_item_id,
+  ebs_inv.organization_id,
+  m1.order_date,
+  oc.line_id
+FROM
+/* OC orders (keys only) */
+(
+  SELECT
+    customer_po,
+    line_id::bigint AS line_id,
+    item_id::bigint AS item_id,
+    source_system
+  FROM edw_prod_dbo.w_sales_orders_v
+  WHERE source_system = 'OC'
+) oc
+
+/* EBS orders (keys only) */
+JOIN (
+  SELECT
+    customer_po,
+    item_id::bigint          AS item_id,
+    ship_from_org_id::bigint AS ship_from_org_id,
+    source_system
+  FROM edw_prod_dbo.w_sales_orders_v
+  WHERE source_system = 'EBS'
+) ebs
+  ON ebs.customer_po = oc.customer_po
+
+/* OC item org (only BIM, only used cols) */
+JOIN (
+  SELECT
+    inventory_item_id,
+    item_number,
+    source_system
+  FROM edw_prod_dbo.w_item_org_d
+  WHERE organization_code = 'BIM'
+) oc_inv
+  ON oc.item_id       = oc_inv.inventory_item_id
+ AND oc.source_system = oc_inv.source_system
+
+/* EBS item org (only required cols) */
+JOIN (
+  SELECT
+    inventory_item_id,
+    organization_id,
+    item_number,
+    source_system
+  FROM edw_prod_dbo.w_item_org_d
+) ebs_inv
+  ON ebs.item_id          = ebs_inv.inventory_item_id
+ AND ebs.source_system    = ebs_inv.source_system
+ AND ebs.ship_from_org_id = ebs_inv.organization_id
+ AND ebs_inv.item_number  = oc_inv.item_number
+
+/* Bookings: slimmed to key + date */
+JOIN (
+  SELECT
+    line_id::bigint    AS line_id,
+    "Order Date"::date AS order_date
+  FROM edw_prod_dbo.fnc_bookings_mv
+) m1
+  ON m1.line_id = oc.line_id
+
+/* Eligibility JOIN (replaces EXISTS) */
+JOIN (
+  SELECT DISTINCT
+    dfla.fulfilllinelineid::bigint AS line_id
+  FROM oc_prod_dbo.doo_fulfill_lines_all       dfla
+  JOIN oc_prod_dbo.doo_lines_all               dla
+    ON dla.lineid = dfla.fulfilllinelineid
+  JOIN oc_prod_dbo.doo_headers_all             dha
+    ON dha.headerid = dla.lineheaderid
+  JOIN oc_prod_dbo.msc_xref_mapping            mxm1
+    ON mxm1.entity_name = 'SUPPLIERS'
+   AND mxm1.target_value = dfla.fulfilllinesupplierid
+  JOIN oc_prod_dbo.msc_xref_mapping            mxm2
+    ON mxm2.entity_name = 'SUPPLIER_SITES'
+   AND mxm2.target_value = dfla.fulfilllinesuppliersiteid
+  JOIN oc_prod_dbo.poz_suppliers               psv
+    ON psv.vendorid = mxm1.source_value
+  JOIN oc_prod_dbo.poz_supplier_sites_all_m    pssam
+    ON pssam.vendorsiteid = mxm2.source_value
+  JOIN oc_prod_dbo.msc_trading_partner_sites   mtps
+    ON mtps.partner_id      = dfla.fulfilllinesupplierid
+   AND mtps.partner_site_id = dfla.fulfilllinesuppliersiteid
+  WHERE dha.headersubmittedflag = 'Y'
+) elig
+  ON elig.line_id = oc.line_id;
+
+
+    -- INSERT INTO cost_temp1 (inventory_item_id, organization_id, order_date, line_id)
+    -- SELECT ebs_inv.inventory_item_id,
+    --        ebs_inv.organization_id,
+    --        m1."Order Date",
+    --        m1.line_id
+    -- FROM edw_prod_dbo.w_sales_orders_v oc
+    -- JOIN edw_prod_dbo.w_sales_orders_v ebs ON oc.customer_po = ebs.customer_po
+    -- JOIN edw_prod_dbo.w_item_org_d oc_inv ON oc.item_id::BIGINT = oc_inv.inventory_item_id
+    -- JOIN edw_prod_dbo.w_item_org_d ebs_inv ON ebs.item_id = ebs_inv.inventory_item_id
+    -- JOIN edw_prod_dbo.fnc_bookings_mv m1 ON m1.line_id::BIGINT = oc.line_id
+    -- WHERE oc.source_system = 'OC'
+    --   AND ebs.source_system = 'EBS'
+    --   AND oc_inv.organization_code = 'BIM'
+    --   AND ebs.ship_from_org_id = ebs_inv.organization_id
+    --   AND ebs_inv.item_number = oc_inv.item_number
+    --   AND ebs_inv.source_system = ebs.source_system
+    --   AND oc_inv.source_system::text = oc.source_system::text
+    --   AND EXISTS (
+    --         SELECT 1
+    --         FROM oc_prod_dbo.msc_trading_partner_sites mtps
+    --         JOIN oc_prod_dbo.doo_fulfill_lines_all dfla ON dfla.fulfilllinelineid::NUMERIC = oc.line_id
+    --         JOIN oc_prod_dbo.doo_lines_all dla ON dla.lineid = dfla.fulfilllinelineid
+    --         JOIN oc_prod_dbo.doo_headers_all dha ON dla.lineheaderid = dha.headerid
+    --         JOIN oc_prod_dbo.msc_xref_mapping mxm1 ON mxm1.entity_name = 'SUPPLIERS' AND mxm1.target_value = dfla.fulfilllinesupplierid
+    --         JOIN oc_prod_dbo.msc_xref_mapping mxm2 ON mxm2.entity_name = 'SUPPLIER_SITES' AND mxm2.target_value = dfla.fulfilllinesuppliersiteid
+    --         JOIN oc_prod_dbo.poz_suppliers psv ON psv.vendorid = mxm1.source_value
+    --         JOIN oc_prod_dbo.poz_supplier_sites_all_m pssam ON pssam.vendorsiteid = mxm2.source_value
+    --         WHERE dha.headersubmittedflag = 'Y'
+    --           AND dfla.fulfilllinesupplierid = mtps.partner_id
+    --           AND dfla.fulfilllinesuppliersiteid = mtps.partner_site_id
+    --   );
+
+    -- Update booking costs
+    UPDATE edw_prod_dbo.fnc_bookings_mv m1
+    SET "Ship From Item Cost LC" = edw_prod_dbo.edw_getcostfrozencostperavglc(e.inventory_item_id::BIGINT, e.organization_id::BIGINT, m1."Order Date"::date, 'EBS'),
+        "Ship From Item Cost USD" = edw_prod_dbo.edw_getcostfrozencostperavgusd(e.inventory_item_id::BIGINT, e.organization_id::BIGINT, m1."Order Date"::date, 'EBS'),
+        "Ext Ship From Item Cost LC" = edw_prod_dbo.edw_getcostfrozencostperavglc(e.inventory_item_id::BIGINT, e.organization_id::BIGINT, m1."Order Date"::date, 'EBS') * m1."Ordered Quantity",
+        "Ext Ship From Item Cost USD" = edw_prod_dbo.edw_getcostfrozencostperavgusd(e.inventory_item_id::BIGINT, e.organization_id::BIGINT, m1."Order Date"::date, 'EBS') * m1."Ordered Quantity"
+    FROM cost_temp1 e
+    WHERE e.line_id = m1.line_id;
+
+    -- Set actual costs for invoiced records
+   WITH acts AS (
+        SELECT f.trx_source_line_id,
+               f.inventory_item_id,
+               f.organization_id,
+               SUM(f.transaction_value * f.transaction_quantity) AS act_cost
+        FROM edw_prod_dbo.w_material_trx_sl_f f
+        GROUP BY f.trx_source_line_id, f.inventory_item_id, f.organization_id
+    )
+    UPDATE edw_prod_dbo.fnc_backlog_billing_mv m
+    SET "Ship From Item Cost LC"  = ROUND(edw_prod_dbo.edw_getcostfrozencostperavglc(f.inventory_item_id::BIGINT, f.organization_id::BIGINT, m."Order Date"::date, 'EBS')::numeric, 2),
+        "Ship From Item Cost USD" = ROUND(edw_prod_dbo.edw_getcostfrozencostperavgusd(f.inventory_item_id::BIGINT, f.organization_id::BIGINT, m."Order Date"::date, 'EBS')::numeric, 2),
+        "Ext Ship From Item Cost LC" = ROUND(edw_prod_dbo.edw_getcostfrozencostperavglc(f.inventory_item_id::BIGINT, f.organization_id::BIGINT, m."Order Date"::date, 'EBS')::numeric * COALESCE(m."Quantity Invoiced", m."Ordered Quantity")::numeric, 2),
+        "Ext Ship From Item Cost USD" = ROUND(edw_prod_dbo.edw_getcostfrozencostperavgusd(f.inventory_item_id::BIGINT, f.organization_id::BIGINT, m."Order Date"::date, 'EBS')::numeric * COALESCE(m."Quantity Invoiced", m."Ordered Quantity")::numeric, 2)
+    FROM acts f
+    WHERE m.line_id = f.trx_source_line_id;
+
+    -------------------------------------------------------------------------
+    -- finish: call update GLSO and end job
+    -------------------------------------------------------------------------
+    CALL edw_prod_dbo.updateglsodata();
+    CALL edw_prod_dbo.edw_log_update_job('GenerateOCBookingsData','C','Complete');
+
+    -- clean up temp
+    DROP TABLE IF EXISTS cost_temp1;
+END;
+$procedure$
+;
