@@ -61,6 +61,7 @@ CREATE TEMP TABLE tmp_cost_elements AS SELECT
     WHERE COALESCE(CAST(cscd.unit_cost AS FLOAT), 0) <> 0;
 
     CREATE INDEX idx_tmp_cost_join ON tmp_cost_elements(std_cost_id);
+    ANALYZE tmp_cost_elements;
 
 
 
@@ -103,6 +104,7 @@ CREATE TEMP TABLE tmp_cost_elements AS SELECT
     WHERE csc.status_code = 'PUBLISHED';
 
     CREATE INDEX idx_tmp_details_join ON tmp_details(cost_element_code);
+    ANALYZE tmp_details;
 
     ---Optimized code end
 --With added here in details
