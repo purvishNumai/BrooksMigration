@@ -1,0 +1,26 @@
+CALL edw_prod_dbo.generateocbookingsdata() ;
+
+
+insight
+1)CALL edw_prod_dbo.generateoccostsdata(); 16ms
+2)
+UPDATE edw_prod_dbo.w_sales_orders_d oc
+SET related_line_id = ebs.line_id
+FROM edw_prod_dbo.w_sales_orders_d ebs
+WHERE oc.source_system = 'OC'
+AND ebs.source_system = 'EBS'
+AND ebs.related_line_id = oc.line_id
+AND oc.related_line_id IS NULL;
+
+3)
+-- mirror MSSQL update EBS.related_line_id where OC.related_line_id points to EBS.line_id
+UPDATE edw_prod_dbo.w_sales_orders_d ebs
+SET related_line_id = oc.line_id
+FROM edw_prod_dbo.w_sales_orders_d oc
+WHERE oc.source_system = 'OC'
+AND ebs.source_system = 'EBS'
+AND oc.related_line_id = ebs.line_id
+AND ebs.related_line_id IS NULL;
+
+4)
+Edw_prod_dbo.updatecloudorderswithebsorgs()  59s
