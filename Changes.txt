@@ -1,2 +1,3 @@
 
 Changes in sp edw_prod_dbo.generateoccostsdata_v3
+Create partison on table
