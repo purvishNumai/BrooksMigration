@@ -3,10 +3,12 @@ CREATE OR REPLACE PROCEDURE edw_prod_dbo.generateocbookingsdata_part6()
 AS $procedure$
 
 DECLARE
-    v_start_time timestamp;
-    v_runtime interval;
+    v_start_time   timestamp;
+    v_end_time     timestamp;
+    v_runtime_ms   numeric;
 BEGIN
 
+    -- Start Time
     v_start_time := clock_timestamp();
     RAISE NOTICE 'Wrapper: generateocbookingsdata_part6 - Started at %', v_start_time;
 
@@ -218,8 +220,11 @@ BEGIN
       AND b.source_system = d.source_system;
 
     -- Calc and Log Duration
-    v_runtime := clock_timestamp() - v_start_time;
-    RAISE NOTICE 'Wrapper: generateocbookingsdata_part6 - Completed. Duration %', v_runtime;
+    -- End time
+    v_end_time := clock_timestamp();
+    -- Duration in milliseconds
+    v_runtime_ms := EXTRACT(EPOCH FROM (v_end_time - v_start_time)) * 1000;
+    RAISE NOTICE 'Wrapper: generateocbookingsdata_part6 - Completed. Start: %, End: %, Duration: % ms',v_start_time,v_end_time,v_runtime_ms;
       
 END;
 $procedure$

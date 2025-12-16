@@ -3,12 +3,15 @@ CREATE OR REPLACE PROCEDURE edw_prod_dbo.generateocbookingsdata_part2()
 AS $procedure$
 
 DECLARE
-    v_start_time timestamp;
-    v_runtime interval;
+    v_start_time   timestamp;
+    v_end_time     timestamp;
+    v_runtime_ms   numeric;
 BEGIN
 
+    -- Start time
     v_start_time := clock_timestamp();
-    RAISE NOTICE 'Wrapper: generateocbookingsdata_part2 - Started at %', v_start_time;
+    RAISE NOTICE 'Wrapper: generateocbookingsdata_part2 - Started at %',v_start_time;
+
      -- mirror MSSQL update OC.related_line_id where EBS.related_line_id points to OC.line_id
     UPDATE edw_prod_dbo.w_sales_orders_d oc
     SET related_line_id = ebs.line_id
@@ -27,9 +30,12 @@ BEGIN
       AND oc.related_line_id = ebs.line_id
       AND ebs.related_line_id IS NULL;
 
-   -- Calc and Log Duration
-    v_runtime := clock_timestamp() - v_start_time;
-    RAISE NOTICE 'Wrapper: generateocbookingsdata_part2 - Completed. Duration %', v_runtime;
+    -- Calc and Log Duration
+    -- End time
+    v_end_time := clock_timestamp();
+    -- Duration in milliseconds
+    v_runtime_ms := EXTRACT(EPOCH FROM (v_end_time - v_start_time)) * 1000;
+    RAISE NOTICE 'Wrapper: generateocbookingsdata_part2 - Completed. Start: %, End: %, Duration: % ms',v_start_time,v_end_time,v_runtime_ms;
 END;
 $procedure$
 ;
