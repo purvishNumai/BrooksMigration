@@ -17,16 +17,16 @@ BEGIN
     DROP TABLE IF EXISTS tmp_cost_elements;
     CREATE UNLOGGED TABLE tmp_cost_elements AS
     SELECT
+        cscd.std_cost_detail_id,
         cscd.std_cost_id,
         cscd.creation_date,
         cscd.last_update_date,
-        cscd.unit_cost::float,
+        COALESCE(CAST(cscd.unit_cost AS FLOAT), 0) AS unit_cost,
         cce.costelementbpeocostelementcode AS cost_element_code
     FROM oc_prod_dbo.cst_std_cost_details cscd
     JOIN oc_prod_dbo.cst_cost_elements_b cce
       ON cscd.cost_element_id = cce.costelementbpeocostelementid
-    WHERE cscd.unit_cost IS NOT NULL
-      AND cscd.unit_cost <> 0;
+    WHERE COALESCE(CAST(cscd.unit_cost AS FLOAT), 0) <> 0;
 
     CREATE INDEX ON tmp_cost_elements(std_cost_id);
 
